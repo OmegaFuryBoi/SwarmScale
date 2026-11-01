@@ -463,6 +463,7 @@ void exchange_ghosts(void)
     n = shift(left, right, sendbuf_l, nl, recvbuf);
     for (int k = 0; k < n; k++) unpack(recvbuf, k, nlocal + nghost++);
 
+
     comm_time += MPI_Wtime() - t0;
 }
 

@@ -5,6 +5,8 @@ swarm_cuda
 swarm_cuda_bench
 swarm_mpi
 swarm_mpi_bench
+swarm_hybrid
+swarm_hybrid_bench
 *.o
 *.out
 *.exe
