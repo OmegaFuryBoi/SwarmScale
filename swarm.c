@@ -14,16 +14,17 @@
 #define VMAX   2.0f      // max speed
 #define PI     3.14159265f
 #define R      5.0f      // neighbour radius
-#define ALIGN  0.1f      // how strongly agents turn toward neighbours
 #define RSEP       1.0f   // separation radius
-#define SEPARATION 0.5f   // strength of the push away from close neighbours
-#define COHESION   0.02f  // strength of the pull toward the group's centre
 #ifndef SAVE_EVERY
 #define SAVE_EVERY 5      // save positions every 5 steps (0 = don't save)
 #endif
 #define PREY      0
 #define PREDATOR  1
-#define NPRED    (N / 50) // the first 2% of agents are predators
+#ifndef PRED_PCT
+#define PRED_PCT  2       // percent of agents that are predators
+#endif
+#define NPRED     (N * PRED_PCT / 100)
+#define NPRED_MAX (NPRED > 0 ? NPRED : 1)
 #define VPRED     2.6f    // predators are a bit faster than prey
 #define RFLEE     8.0f    // prey notice predators within this distance
 #define RHUNT     15.0f   // predators notice prey within this distance
@@ -38,6 +39,9 @@
 #define CONFUSION  20.0f  // penalty (in steps) per unit of crowding around a prey
 
 float W, H;              // world size, set in main from N and DENSITY
+float align_w = 0.1f;    // how strongly agents turn toward neighbours
+float cohesion_w = 0.02f;   // strength of the pull toward the group's centre
+float separation_w = 0.5f;  // strength of the push away from close neighbours
 float x[N], y[N];        // positions
 float vx[N], vy[N];      // velocities
 float nvx[N], nvy[N];    // new velocities (computed each step)
@@ -57,9 +61,9 @@ int   nb_close[N];
 float nb_best_d2[N];
 float nb_best_dx[N], nb_best_dy[N];
 int   nb_best_j[N];
-int   nb_ncand[NPRED];
-int   nb_cand[NPRED * MAXCAND];
-float nb_cdx[NPRED * MAXCAND], nb_cdy[NPRED * MAXCAND];
+int   nb_ncand[NPRED_MAX];
+int   nb_cand[NPRED_MAX * MAXCAND];
+float nb_cdx[NPRED_MAX * MAXCAND], nb_cdy[NPRED_MAX * MAXCAND];
 float dens_raw[GRID * GRID];     
 float dens_tmp[GRID * GRID];     
 float dens[GRID * GRID];       
@@ -282,12 +286,12 @@ void decide_agents(void)
         if (type[i] == PREY) {
             if (count > 0) {
                 float avg_vx = nb_vx[i] / count, avg_vy = nb_vy[i] / count;
-                nvx[i] += ALIGN * (avg_vx - vx[i]);
-                nvy[i] += ALIGN * (avg_vy - vy[i]);
-                nvx[i] += COHESION * (nb_dx[i] / count);
-                nvy[i] += COHESION * (nb_dy[i] / count);
-                nvx[i] += SEPARATION * nb_sepx[i];
-                nvy[i] += SEPARATION * nb_sepy[i];
+                nvx[i] += align_w * (avg_vx - vx[i]);
+                nvy[i] += align_w * (avg_vy - vy[i]);
+                nvx[i] += cohesion_w * (nb_dx[i] / count);
+                nvy[i] += cohesion_w * (nb_dy[i] / count);
+                nvx[i] += separation_w * nb_sepx[i];
+                nvy[i] += separation_w * nb_sepy[i];
             }
             if (best_j >= 0) {
                 float d = sqrtf(best_d2);
@@ -377,6 +381,17 @@ float polarization(void)
     return sqrtf(sx * sx + sy * sy) / ((N - NPRED) * VMAX);
 }
 
+void read_controls(void)
+{
+    FILE *f = fopen("controls.txt", "r");
+    if (f == NULL) return;
+    float a, c, sep;
+    if (fscanf(f, "%f %f %f", &a, &c, &sep) == 3) {
+        align_w = a; cohesion_w = c; separation_w = sep;
+    }
+    fclose(f);
+}
+
 int main(void)
 {
     W = H = sqrtf(N / DENSITY); 
@@ -389,6 +404,7 @@ int main(void)
     init_mask();
     FILE *out = NULL;
     FILE *dout = NULL;
+    FILE *mout = NULL;
     if (SAVE_EVERY > 0) {
         out = fopen("frames.csv", "w");
         if (out == NULL) {
@@ -397,12 +413,17 @@ int main(void)
         }
         fprintf(out, "step,x,y,vx,vy,type\n");
           dout = fopen("density.csv", "w");
+          mout = fopen("metrics.csv", "w");
+          fprintf(mout, "step,polarization,neighbours,fleeing,catches,ms_per_step\n");
     }
 
     double neigh_time = 0, density_time = 0, decide_time = 0;
     double start = omp_get_wtime();
 
+    double last_save = omp_get_wtime();
     for (int step = 0; step < STEPS; step++) {
+        if (step % 10 == 0)
+            read_controls();
         double t0 = omp_get_wtime();
         neighbour_search();
         double t1 = omp_get_wtime();
@@ -419,7 +440,12 @@ int main(void)
         if (SAVE_EVERY > 0 && step % SAVE_EVERY == 0) {
             save_frame(out, step);
             save_density(dout, step);
-       }
+            double now = omp_get_wtime();
+            fprintf(mout, "%d,%.4f,%.2f,%d,%d,%.3f\n", step, polarization(), avg_neighbours,
+                    num_fleeing, total_catches, 1000 * (now - last_save) / SAVE_EVERY);
+            last_save = now;
+            fflush(out); fflush(dout); fflush(mout);
+        }
         if (step % 100 == 0)
             printf("step %4d: polarization %.3f | avg neighbours %5.1f | fleeing %3d | catches %d\n",
                    step, polarization(), avg_neighbours, num_fleeing, total_catches);
@@ -447,7 +473,8 @@ int main(void)
     if (out != NULL) {
         fclose(out);
         fclose(dout);
-        printf("saved frames.csv and density.csv\n");
+        fclose(mout);
+        printf("saved frames.csv, density.csv and metrics.csv\n");
     }
     return 0;
 }
