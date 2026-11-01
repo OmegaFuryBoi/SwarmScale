@@ -73,6 +73,8 @@ float nb_best_d2[N];
 float nb_best_dx[N], nb_best_dy[N];
 int   nb_best_j[N];
 int   nb_ncand[N];
+int   pred_slot[N];
+int   npred_local = 0;
 int   nb_cand[N * MAXCAND];
 float nb_cdx[N * MAXCAND], nb_cdy[N * MAXCAND];
 float dens_raw[GRID * GRID];     
@@ -236,7 +238,8 @@ __global__ void neighbour_kernel(const float *x, const float *y, const float *vx
                                  float *nb_vx, float *nb_vy, float *nb_dx, float *nb_dy,
                                  float *nb_sepx, float *nb_sepy, int *nb_count, int *nb_close,
                                  float *nb_best_d2, float *nb_best_dx, float *nb_best_dy, int *nb_best_j,
-                                 int *nb_ncand, int *nb_cand, float *nb_cdx, float *nb_cdy)
+                                 int *nb_ncand, int *nb_cand, float *nb_cdx, float *nb_cdy,
+                                 const int *slot)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_local) return;
@@ -262,9 +265,9 @@ __global__ void neighbour_kernel(const float *x, const float *y, const float *vx
                 best_d2 = d2; best_dx = dx; best_dy = dy; best_j = j;
             }
             if (type[i] == PREDATOR && d2 < RHUNT * RHUNT && ncand < MAXCAND) {
-                nb_cand[i * MAXCAND + ncand] = j;
-                nb_cdx[i * MAXCAND + ncand]  = dx;
-                nb_cdy[i * MAXCAND + ncand]  = dy;
+                nb_cand[slot[i] * MAXCAND + ncand] = j;
+                nb_cdx[slot[i] * MAXCAND + ncand]  = dx;
+                nb_cdy[slot[i] * MAXCAND + ncand]  = dy;
                 ncand++;
             }
         } else if (type[i] == PREY && d2 < R * R) {
@@ -289,7 +292,7 @@ __global__ void neighbour_kernel(const float *x, const float *y, const float *vx
     nb_best_dx[i] = best_dx;
     nb_best_dy[i] = best_dy;
     nb_best_j[i]  = best_j;
-    if (type[i] == PREDATOR) nb_ncand[i] = ncand;
+    if (type[i] == PREDATOR) nb_ncand[slot[i]] = ncand;
 }
 
 float *d_x, *d_y, *d_vx, *d_vy;
@@ -300,6 +303,7 @@ float *d_nb_best_d2, *d_nb_best_dx, *d_nb_best_dy;
 int   *d_nb_best_j;
 int   *d_nb_ncand, *d_nb_cand;
 float *d_nb_cdx, *d_nb_cdy;
+int   *d_slot;
 
 cudaEvent_t ev_start, ev_stop;
 float kernel_ms = 0;
@@ -321,7 +325,7 @@ void gpu_init(void)
 
     int fA = CAP * sizeof(float), iA = CAP * sizeof(int);
     int fN = N * sizeof(float), iN = N * sizeof(int);
-    int fC = N * MAXCAND * sizeof(float), iC = N * MAXCAND * sizeof(int);
+    int fC = NPRED * MAXCAND * sizeof(float), iC = NPRED * MAXCAND * sizeof(int);
 
     check(cudaMalloc((void **)&d_x, fA), "cudaMalloc");
     check(cudaMalloc((void **)&d_y, fA), "cudaMalloc");
@@ -340,7 +344,8 @@ void gpu_init(void)
     check(cudaMalloc((void **)&d_nb_best_dx, fN), "cudaMalloc");
     check(cudaMalloc((void **)&d_nb_best_dy, fN), "cudaMalloc");
     check(cudaMalloc((void **)&d_nb_best_j, iN), "cudaMalloc");
-    check(cudaMalloc((void **)&d_nb_ncand, iN), "cudaMalloc");
+    check(cudaMalloc((void **)&d_nb_ncand, NPRED * sizeof(int)), "cudaMalloc");
+    check(cudaMalloc((void **)&d_slot, iN), "cudaMalloc");
     check(cudaMalloc((void **)&d_nb_cand, iC), "cudaMalloc");
     check(cudaMalloc((void **)&d_nb_cdx, fC), "cudaMalloc");
     check(cudaMalloc((void **)&d_nb_cdy, fC), "cudaMalloc");
@@ -356,6 +361,7 @@ void gpu_free(void)
     cudaFree(d_nb_sepx); cudaFree(d_nb_sepy); cudaFree(d_nb_count); cudaFree(d_nb_close);
     cudaFree(d_nb_best_d2); cudaFree(d_nb_best_dx); cudaFree(d_nb_best_dy); cudaFree(d_nb_best_j);
     cudaFree(d_nb_ncand); cudaFree(d_nb_cand); cudaFree(d_nb_cdx); cudaFree(d_nb_cdy);
+    cudaFree(d_slot);
     cudaEventDestroy(ev_start);
     cudaEventDestroy(ev_stop);
 }
@@ -363,16 +369,21 @@ void gpu_free(void)
 void neighbour_search(void)
 {
     if (nlocal == 0) return;
+    npred_local = 0;
+    for (int i = 0; i < nlocal; i++)
+        pred_slot[i] = (type[i] == PREDATOR) ? npred_local++ : -1;
+
     int n_total = nlocal + nghost;
     int fT = n_total * sizeof(float), iT = n_total * sizeof(int);
     int fL = nlocal * sizeof(float), iL = nlocal * sizeof(int);
-    int fC = nlocal * MAXCAND * sizeof(float), iC = nlocal * MAXCAND * sizeof(int);
+    int fC = npred_local * MAXCAND * sizeof(float), iC = npred_local * MAXCAND * sizeof(int);
 
     check(cudaMemcpy(d_x, x, fT, cudaMemcpyHostToDevice), "copy x");
     check(cudaMemcpy(d_y, y, fT, cudaMemcpyHostToDevice), "copy y");
     check(cudaMemcpy(d_vx, vx, fT, cudaMemcpyHostToDevice), "copy vx");
     check(cudaMemcpy(d_vy, vy, fT, cudaMemcpyHostToDevice), "copy vy");
     check(cudaMemcpy(d_type, type, iT, cudaMemcpyHostToDevice), "copy type");
+    check(cudaMemcpy(d_slot, pred_slot, iL, cudaMemcpyHostToDevice), "copy slot");
 
     int threads = 256;
     int blocks = (nlocal + threads - 1) / threads;
@@ -382,7 +393,7 @@ void neighbour_search(void)
                                           d_nb_vx, d_nb_vy, d_nb_dx, d_nb_dy,
                                           d_nb_sepx, d_nb_sepy, d_nb_count, d_nb_close,
                                           d_nb_best_d2, d_nb_best_dx, d_nb_best_dy, d_nb_best_j,
-                                          d_nb_ncand, d_nb_cand, d_nb_cdx, d_nb_cdy);
+                                          d_nb_ncand, d_nb_cand, d_nb_cdx, d_nb_cdy, d_slot);
     cudaEventRecord(ev_stop);
     check(cudaGetLastError(), "neighbour_kernel launch");
     cudaEventSynchronize(ev_stop);
@@ -402,7 +413,7 @@ void neighbour_search(void)
     check(cudaMemcpy(nb_best_dx, d_nb_best_dx, fL, cudaMemcpyDeviceToHost), "copy back");
     check(cudaMemcpy(nb_best_dy, d_nb_best_dy, fL, cudaMemcpyDeviceToHost), "copy back");
     check(cudaMemcpy(nb_best_j, d_nb_best_j, iL, cudaMemcpyDeviceToHost), "copy back");
-    check(cudaMemcpy(nb_ncand, d_nb_ncand, iL, cudaMemcpyDeviceToHost), "copy back");
+    check(cudaMemcpy(nb_ncand, d_nb_ncand, npred_local * sizeof(int), cudaMemcpyDeviceToHost), "copy back");
     check(cudaMemcpy(nb_cand, d_nb_cand, iC, cudaMemcpyDeviceToHost), "copy back");
     check(cudaMemcpy(nb_cdx, d_nb_cdx, fC, cudaMemcpyDeviceToHost), "copy back");
     check(cudaMemcpy(nb_cdy, d_nb_cdy, fC, cudaMemcpyDeviceToHost), "copy back");
@@ -447,8 +458,9 @@ void decide_agents(void)
             total_too_close  += nb_close[i];
         } else {
             float hx, hy;
-            int planned = plan_hunt(nb_ncand[i], &nb_cand[i * MAXCAND],
-                                    &nb_cdx[i * MAXCAND], &nb_cdy[i * MAXCAND], &hx, &hy);
+            int p = pred_slot[i];
+            int planned = plan_hunt(nb_ncand[p], &nb_cand[p * MAXCAND],
+                                    &nb_cdx[p * MAXCAND], &nb_cdy[p * MAXCAND], &hx, &hy);
             if (planned >= 0) {
                 target[i] = planned;
                 nvx[i] += CHASE * VPRED * hx;
