@@ -22,3 +22,7 @@ metrics.csv
 controls.txt
 runs/
 *.gif
+
+# Python
+.venv/
+__pycache__/
